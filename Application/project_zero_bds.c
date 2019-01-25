@@ -47,6 +47,7 @@
  * INCLUDES
  */
 #include <string.h>
+#include "Middleware/ControlLEDs.h"
 
 //#define xdc_runtime_Log_DISABLE_ALL 1  // Add to disable logs from this file
 
@@ -81,9 +82,8 @@
 #include "BleServices/settings.h"
 #include "BleServices/control.h"
 #include "BleServices/testing.h"
-#include "BleParser.h"
 
-//#include "CustomDrivers/MotorControl.h"
+
 /*********************************************************************
  * CONSTANTS
  */
@@ -724,11 +724,14 @@ static void user_processGapStateChangeEvt(gaprole_States_t newState)
  *
  * @return  None.
  */
+
 void user_Settings_ValueChangeHandler(char_data_t *pCharData)
 {
   static uint8_t pretty_data_holder[16]; // 5 bytes as hex string "AA:BB:CC:DD:EE"
   Util_convertArrayToHexString(pCharData->data, pCharData->dataLen,
                                pretty_data_holder, sizeof(pretty_data_holder));
+
+
 
   switch (pCharData->paramID)
   {
@@ -740,7 +743,9 @@ void user_Settings_ValueChangeHandler(char_data_t *pCharData)
 
       // Do something useful with pCharData->data here
       // -------------------------
-      processLedSequence(pCharData->data);
+
+      setLedSequence(pCharData->data);
+
       break;
 
     case S_ACCCURVE1_ID:
@@ -751,7 +756,6 @@ void user_Settings_ValueChangeHandler(char_data_t *pCharData)
 
       // Do something useful with pCharData->data here
       // -------------------------
-      processAccelerationCurvePart1(pCharData->data);
       break;
 
     case S_ACCCURVE2_ID:
@@ -762,7 +766,6 @@ void user_Settings_ValueChangeHandler(char_data_t *pCharData)
 
       // Do something useful with pCharData->data here
       // -------------------------
-      processAccelerationCurvePart2(pCharData->data);
       break;
 
     case S_DECCCURVE1_ID:
@@ -773,7 +776,6 @@ void user_Settings_ValueChangeHandler(char_data_t *pCharData)
 
       // Do something useful with pCharData->data here
       // -------------------------
-      processDecelerationCurvePart1(pCharData->data);
       break;
 
     case S_DECCCURVE2_ID:
@@ -784,7 +786,6 @@ void user_Settings_ValueChangeHandler(char_data_t *pCharData)
 
       // Do something useful with pCharData->data here
       // -------------------------
-      processDecelerationCurvePart2(pCharData->data);
       break;
 
   default:
@@ -821,7 +822,11 @@ void user_Control_ValueChangeHandler(char_data_t *pCharData)
 
       // Do something useful with pCharData->data here
       // -------------------------
-      processCommand(pCharData->data);
+//      for(uint8_t l_i = 0; l_i < pCharData->dataLen; ++l_i){
+//
+//      }
+      setLedsComand(pCharData->data);
+
       break;
 
     case C_MODE_ID:
@@ -832,7 +837,6 @@ void user_Control_ValueChangeHandler(char_data_t *pCharData)
 
       // Do something useful with pCharData->data here
       // -------------------------
-      processMode(pCharData->data);
       break;
 
   default:
@@ -853,7 +857,6 @@ void user_Control_ValueChangeHandler(char_data_t *pCharData)
  *
  * @return  None.
  */
-
 void user_Testing_ValueChangeHandler(char_data_t *pCharData)
 {
   static uint8_t pretty_data_holder[16]; // 5 bytes as hex string "AA:BB:CC:DD:EE"
@@ -870,13 +873,12 @@ void user_Testing_ValueChangeHandler(char_data_t *pCharData)
 
       // Do something useful with pCharData->data here
       // -------------------------
-
-      //extern int32_t s_steeringAngle;
+      extern int32_t s_steeringAngle;
       uint16_t l_data;
       l_data = pCharData->data[1];
       l_data <<= 8;
       l_data |= pCharData->data[0];
-      //MotorControl_setSteeringAngle((int16_t)l_data);
+      s_steeringAngle = (int16_t)l_data;
       break;
 
     case T_SPEED_ID:
@@ -887,16 +889,18 @@ void user_Testing_ValueChangeHandler(char_data_t *pCharData)
 
       // Do something useful with pCharData->data here
       // -------------------------
-      //extern int32_t s_period;
-
+      extern int32_t s_period;
       uint16_t l_data2;
       int16_t l_pps;
-      int32_t l_speedData;
       l_data2 = pCharData->data[1];
       l_data2 <<= 8;
       l_data2 |= pCharData->data[0];
-      //MotorControl_setSpeed((int16_t)l_data2);//l_pps = (int16_t)l_data2;
-
+      l_pps = (int16_t)l_data2;
+      if (l_pps == 0) {
+          s_period = 0;
+      } else if ((l_pps <= 2000) && (l_pps >= -2000)) {
+          s_period = 100000L / l_pps;
+      }
       break;
 
   default:

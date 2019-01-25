@@ -66,6 +66,25 @@ uint8_t I2cDriver_writeReg(uint8_t addr, uint8_t *regAndData, uint8_t len)
 }
 
 /*
+ * @brief   Write single register
+ *
+ * @param   addr    - slave address (7 bit)
+ * @param   reg     - register address
+ * @param   val     - register value
+ *
+ * @return  1 - ok, 0 - fail
+ */
+uint8_t I2cDriver_writeSingleReg(uint8_t addr, uint8_t reg, uint8_t val)
+{
+    uint8_t l_writeData[2];
+
+    l_writeData[0] = reg;
+    l_writeData[1] = val;
+
+    return I2cDriver_writeReg(addr, l_writeData, 2);
+}
+
+/*
  * @brief   Read registers
  *
  * @param   addr        - slave address (7 bit)
