@@ -61,7 +61,7 @@
 #include "bcomdef.h"
 #include "peripheral.h"
 #include "project_zero.h"
-#include "Middleware/ControlLEDs.h"
+
 /* Header files required to enable instruction fetch cache */
 #include <inc/hw_memmap.h>
 #include <driverlib/vims.h>
@@ -104,6 +104,8 @@ bleUserCfg_t user0Cfg = BLE_USER_CFG;
  * TYPEDEFS
  */
 
+
+
 /*******************************************************************************
  * LOCAL VARIABLES
  */
@@ -111,6 +113,8 @@ bleUserCfg_t user0Cfg = BLE_USER_CFG;
 /*******************************************************************************
  * GLOBAL VARIABLES
  */
+//uint8_t dataBluetooth[255];
+
 
 #ifdef CC1350_LAUNCHXL
 #ifdef POWER_SAVING
@@ -140,13 +144,38 @@ extern Display_Handle dispHandle;
 
 
 
-//#include <ti/sysbios/knl/Task.h>
+#include <ti/sysbios/knl/Task.h>
 #include <ti/drivers/UART.h>
 #include <ti/drivers/Watchdog.h>
-//#include "CustomDrivers/I2cDriver.h"
-//#include "CustomDrivers/IoExpanders.h"
-//#include "CustomDrivers/MotorDriver.h"
-#include "CustomDrivers/MotorControl.h"
+#include "CustomDrivers/I2cDriver.h"
+#include "CustomDrivers/IoExpanders.h"
+#include "CustomDrivers/MotorDriver.h"
+#include "CustomDrivers/Accelerometer.h"
+#include "CustomDrivers/Magnetometer.h"
+#include "Middleware/ControlLEDs.h"
+
+#include <string.h>
+#include <stdio.h>
+#include <math.h>
+
+static void SteeringMotor_taskFxn(UArg a0, UArg a1);
+static void SpeedMotor_taskFxn(UArg a0, UArg a1);
+
+// Task configuration
+#define I2C_BUS_TASK_PRIORITY         3   // 0 - idle, 1 - lowest, 15 - highest
+#define I2C_BUS_TASK_STACK_SIZE       480 // multiples of 8 only
+
+
+Task_Struct s_steeringMotorTask;
+uint8_t s_steeringMotorTaskStack[I2C_BUS_TASK_STACK_SIZE];
+Task_Struct s_speedMotorTask;
+uint8_t s_speedMotorTaskStack[I2C_BUS_TASK_STACK_SIZE];
+Task_Struct s_accelerometerTask;
+uint8_t s_accelerometerTaskStack[I2C_BUS_TASK_STACK_SIZE];//*2
+Task_Struct s_magnetometerTask;
+uint8_t s_magnetometerTaskStack[I2C_BUS_TASK_STACK_SIZE];//*3
+Task_Struct s_regulatorTask;
+uint8_t s_regulatorTaskStack[I2C_BUS_TASK_STACK_SIZE];//*3
 
 
 UART_Handle s_uart;
@@ -181,7 +210,276 @@ void watchdogInit(void)
     Watchdog_clear(s_watchdogHandle);
 }
 
+/*
+ * @brief   Task creation function for .
+ *
+ * @param   none
+ *
+ * @return  none
+ */
+void SteeringMotor_createTask(void)
+{
+  Task_Params l_taskParams;
 
+  // Configure task
+  Task_Params_init(&l_taskParams);
+  l_taskParams.stack = s_steeringMotorTaskStack;
+  l_taskParams.stackSize = I2C_BUS_TASK_STACK_SIZE;
+  l_taskParams.priority = I2C_BUS_TASK_PRIORITY;
+
+  Task_construct(&s_steeringMotorTask, SteeringMotor_taskFxn, &l_taskParams, NULL);
+}
+
+/*
+ * @brief   Task creation function for .
+ *
+ * @param   none
+ *
+ * @return  none
+ */
+void SpeedMotor_createTask(void)
+{
+  Task_Params l_taskParams;
+
+  // Configure task
+  Task_Params_init(&l_taskParams);
+  l_taskParams.stack = s_speedMotorTaskStack;
+  l_taskParams.stackSize = I2C_BUS_TASK_STACK_SIZE;
+  l_taskParams.priority = I2C_BUS_TASK_PRIORITY;
+
+  Task_construct(&s_speedMotorTask, SpeedMotor_taskFxn, &l_taskParams, NULL);
+}
+
+int32_t s_steeringAngle = 0;
+int32_t s_period = 0;
+uint8_t s_motorsInitialized = 0;
+
+/*
+ * @brief   I2C bus management task.
+ *
+ * @param   a0, a1 - not used.
+ *
+ * @return  None.
+ */
+static void SteeringMotor_taskFxn(UArg a0, UArg a1)
+{
+    //UART_write(s_uart, "STRM\n", 5);
+
+    I2cDriver_init();
+    IoExpanders_init();
+    MotorDriver_init();
+
+    s_motorsInitialized = 1;
+
+    for (;;) {
+        if (s_steeringAngle > 0) {
+            --s_steeringAngle;
+            MotorDriver_stepRight(kSteeringMotor, kFullStep2WindingsOn);
+        } else if (s_steeringAngle < 0) {
+            ++s_steeringAngle;
+            MotorDriver_stepLeft(kSteeringMotor, kFullStep2WindingsOn);
+        } else {
+            MotorDriver_off(kSteeringMotor);
+        }
+        Task_sleep(10*100);
+        MotorDriver_off(kSteeringMotor);
+        Task_sleep(15*100);
+    }
+}
+
+/*
+ * @brief   I2C bus management task.
+ *
+ * @param   a0, a1 - not used.
+ *
+ * @return  None.
+ */
+static void SpeedMotor_taskFxn(UArg a0, UArg a1)
+{
+    //UART_write(s_uart, "Init\n", 5);
+
+    while (!s_motorsInitialized) {
+        Task_sleep(10*100);
+    }
+
+    for (;;) {
+        if ((s_period < 80*100) && (s_period > -80*100)) {
+            if (s_period == 0) {
+                MotorDriver_off(kTractionMotor);
+                Task_sleep(10*100);
+            } else if (s_period > 0) {
+                MotorDriver_stepRight(kTractionMotor, kFullStepMode);
+                if (s_period > 10*100) {
+                    Task_sleep(s_period/2);
+                    MotorDriver_off(kTractionMotor);
+                    Task_sleep(s_period/2);
+                } else {
+                    Task_sleep(s_period);
+                }
+            } else {
+                MotorDriver_stepLeft(kTractionMotor, kFullStepMode);
+                if (s_period < -10*100) {
+                    Task_sleep(-s_period/2);
+                    MotorDriver_off(kTractionMotor);
+                    Task_sleep(-s_period/2);
+                } else {
+                    Task_sleep(-s_period);
+                }
+            }
+        } else {
+            if (s_period == 0) {
+                MotorDriver_off(kTractionMotor);
+                Task_sleep(10*100);
+            } else if (s_period > 0) {
+                MotorDriver_stepRight(kTractionMotor, kHalfStepMode);
+                if (s_period/2 > 10*100) {
+                    Task_sleep(s_period/4);
+                    MotorDriver_off(kTractionMotor);
+                    Task_sleep(s_period/4);
+                } else {
+                    Task_sleep(s_period/2);
+                }
+            } else {
+                MotorDriver_stepLeft(kTractionMotor, kHalfStepMode);
+                if (s_period/2 < -10*100) {
+                    Task_sleep(-s_period/4);
+                    MotorDriver_off(kTractionMotor);
+                    Task_sleep(-s_period/4);
+                } else {
+                    Task_sleep(-s_period/2);
+                }
+            }
+        }
+    }
+}
+
+char s_log[100];
+
+/*
+ * @brief   Accelerometer management task.
+ *
+ * @param   a0, a1 - not used.
+ *
+ * @return  None.
+ */
+static void Accelerometer_taskFxn(UArg a0, UArg a1)
+{
+    volatile float l_accX, l_accY, l_accZ;
+
+    Task_sleep(100*100);
+
+    I2cDriver_init();
+    Task_sleep(100*100);
+    Accelerometer_init();
+
+
+    while (1) {
+
+        Accelerometer_getAccelerations(&l_accX, &l_accY, &l_accZ);
+
+    }
+}
+
+/*
+ * @brief   Task creation function for .
+ *
+ * @param   none
+ *
+ * @return  none
+ */
+void Accelerometer_createTask(void)
+{
+  Task_Params l_taskParams;
+
+  // Configure task
+  Task_Params_init(&l_taskParams);
+  l_taskParams.stack = s_accelerometerTaskStack;
+  l_taskParams.stackSize = I2C_BUS_TASK_STACK_SIZE*2;
+  l_taskParams.priority = I2C_BUS_TASK_PRIORITY;
+
+  Task_construct(&s_accelerometerTask, Accelerometer_taskFxn, &l_taskParams, NULL);
+}
+
+/*
+ * @brief   Magnetometer management task.
+ *
+ * @param   a0, a1 - not used.
+ *
+ * @return  None.
+ */
+float s_mod, s_oY;
+
+static void Magnetometer_taskFxn(UArg a0, UArg a1)
+{
+    volatile float l_magX, l_magY, l_magZ;
+    float l_magXcount = 0, l_magYcount = 0, l_magZcount = 0;
+    const float l_kEps = 0.0001;
+
+    Task_sleep(100*100);
+
+    I2cDriver_init();
+    Task_sleep(100*100);
+    Magnetometer_init();
+
+    while (1) {
+
+        const int countMeasurement = 20;
+        for(int l_i = 0; l_i < countMeasurement; l_i++){
+            Magnetometer_getRelativeValues(&l_magX, &l_magY, &l_magZ);
+            l_magXcount += l_magX;
+            l_magYcount += l_magY;
+            l_magZcount += l_magZ;
+            Task_sleep(1000*5);
+        }
+
+        l_magXcount /= countMeasurement;
+        l_magYcount /= countMeasurement;
+        l_magZcount /= countMeasurement;
+
+
+
+
+        if( l_magZcount >= -1.0 + l_kEps && l_magYcount >= -1.0 + l_kEps )
+        {
+            //float l_alfa, oX;
+            s_mod = sqrt(l_magYcount*l_magYcount + l_magZcount*l_magZcount);
+
+            //oX = asin(l_magXcount / s_mod)*180.0/3.14;
+            s_oY = asin(l_magYcount / s_mod)*180.0/3.14;
+
+            //l_alfa = atan(l_magXcount/l_magZcount)*180.0/3.14;
+
+            //sprintf(s_log, "X=%.2f Y=%.2f Z=%.2f mod=%.2f alfa=%.2f oX = %.2f oY = %.2f\r", l_magXcount, l_magYcount, l_magZcount, s_mod, l_alfa, oX, s_oY);
+            //sprintf(s_log, "Y=%.2f Z=%.2f oY = %.2f\r",l_magYcount, l_magZcount, s_oY);
+            //UART_write(s_uart, s_log, strlen(s_log));
+            //Task_sleep(1000);
+        }
+        l_magXcount = 0;
+        l_magYcount = 0;
+        l_magZcount = 0;
+
+    }
+}
+
+/*
+ * @brief   Task creation function for .
+ *
+ * @param   none
+ *
+ * @return  none
+ */
+void Magnetometer_createTask(void)
+{
+  Task_Params l_taskParams;
+
+  // Configure task
+  Task_Params_init(&l_taskParams);
+  l_taskParams.stack = s_magnetometerTaskStack;
+  l_taskParams.stackSize = I2C_BUS_TASK_STACK_SIZE*2;
+  l_taskParams.priority = I2C_BUS_TASK_PRIORITY;
+
+  Task_construct(&s_magnetometerTask, Magnetometer_taskFxn, &l_taskParams, NULL);
+}
 
 void UartInit(void)
 {
@@ -204,6 +502,81 @@ void UartInit(void)
         while (1);
     }
 }
+
+
+
+/*
+ * @brief   Regulator management task.
+ *
+ * @param   a0, a1 - not used.
+ *
+ * @return  None.
+ */
+static void Regulator_taskFxn(UArg a0, UArg a1)
+{
+    //Task_sleep(100*100);
+
+    const int k_lCountStepMotor = 100; // max count step for Steering Motor
+    const int k_lKpReg = 1; // Kp for P regulator
+    const int k_lLimitsOY = 90; // limit for angle
+    const float k_lBedModLevel = 0.08;
+
+
+
+    while (1) {
+
+        if(s_mod > k_lBedModLevel)
+         {
+             s_steeringAngle = floor(s_oY * k_lCountStepMotor * k_lKpReg / k_lLimitsOY);
+         }else
+         {
+             s_steeringAngle = 0; // in future add processing this variant
+         }
+
+
+
+         if (s_steeringAngle < -25)
+         {
+             sprintf(s_log, "RIGHT\rmod=%.2f, angle=%.2f steeringAngle=%d\r", s_mod, s_oY, s_steeringAngle);
+             UART_write(s_uart, s_log, strlen(s_log));
+
+         } else if(s_steeringAngle > 25)
+         {
+             sprintf(s_log, "LEFT\rmod=%.2f, angle=%.2f steeringAngle=%d\r", s_mod, s_oY, s_steeringAngle);
+             UART_write(s_uart, s_log, strlen(s_log));
+         }else
+         {
+             sprintf(s_log, "FORWARD\rmod=%.2f, angle=%.2f steeringAngle=%d\r", s_mod, s_oY, s_steeringAngle);
+             UART_write(s_uart, s_log, strlen(s_log));
+         }
+
+        Task_sleep(1000*100);
+    }
+}
+
+/*
+ * @brief   Task creation function for .
+ *
+ * @param   none
+ *
+ * @return  none
+ */
+void Regulator_createTask(void)
+{
+  Task_Params l_taskParams;
+
+  // Configure task
+  Task_Params_init(&l_taskParams);
+  l_taskParams.stack = s_regulatorTaskStack;
+  l_taskParams.stackSize = I2C_BUS_TASK_STACK_SIZE*2;
+  l_taskParams.priority = I2C_BUS_TASK_PRIORITY;
+
+  Task_construct(&s_regulatorTask, Regulator_taskFxn, &l_taskParams, NULL);
+
+}
+
+
+
 
 /*******************************************************************************
  * @fn          Main
@@ -285,8 +658,16 @@ int main()
 
   UartInit();
   //watchdogInit();
+
+  //SteeringMotor_createTask();
+  //SpeedMotor_createTask();
+
+  //Accelerometer_createTask();
+  //Regulator_createTask();
+  //Magnetometer_createTask();
   LedsControl_createTask();
-  MotorControl_init();
+
+
   /* enable interrupts and start SYS/BIOS */
   BIOS_start();
 
